@@ -15,7 +15,7 @@
   </h2>
 
 
-  <div class="ui accordion">
+  <div class="ui accordion" id="row-output">
     <div class="title">
       <h4 class="ui clearing segment">
         <i class="dropdown icon"></i>
@@ -24,7 +24,17 @@
     </div>
     <div class="content" style="overflow-y:auto;white-space:nowrap;">
       <p class="transition hidden">
-      <pre><%= @score.feedback %> </pre>
+      <% if @jsonFeedback["Output"] == "only instructor" %>
+          <% if @current_user.instructor? %>
+            <pre><%= @score.feedback %> </pre>
+          <% else %>
+            <script>
+                $('#row-output').hide()
+            </script>
+          <% end %>
+        <% else %>
+          <pre><%= @score.feedback %> </pre>
+        <% end %>
       </p>
     </div>
   </div>
