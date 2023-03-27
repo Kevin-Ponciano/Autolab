@@ -37,11 +37,14 @@
   <% if !@ctag_obj.nil? && !@ctag_obj.empty? %>
     hasSymbolTree = true;
   <% end %>
+  <% if @cud.instructor? %>
   fileComponents.push({
       type: "component",
       componentName: "file_tree",
       title: "File Outline",
-    });
+  });
+  <% end %>
+
   fileComponents.push({
       type: "component",
       componentName: "code_symbol_tree",
