@@ -7,7 +7,7 @@
 #     https://github.com/phusion/passenger-docker
 #
 #
-FROM phusion/passenger-ruby26:2.0.0
+FROM phusion/passenger-ruby27
 
 MAINTAINER Autolab Development Team "autolab-dev@andrew.cmu.edu"
 
@@ -58,6 +58,7 @@ RUN mkdir -p /home/app/webapp/log && \
 USER app
 
 # precompile the Rails assets
+ENV SECRET_KEY_BASE=dummy_secret_key_base
 RUN RAILS_ENV=production bundle exec rails assets:precompile
 
 # Clean up APT when done.
@@ -66,4 +67,3 @@ RUN apt-get clean && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
 # Use baseimage-docker's init system.
 CMD ["/sbin/my_init"]
-

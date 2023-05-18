@@ -33,7 +33,7 @@ class UsersController < ApplicationController
   # based on current user's role
   action_auth_level :show, :student
   def show
-    user = User.find(params[:id])
+    user = User.find_by id: params[:id]
     if user.nil?
       flash[:error] = "User does not exist"
       redirect_to(users_path) && return
@@ -183,6 +183,11 @@ class UsersController < ApplicationController
   def destroy
     unless current_user.administrator?
       flash[:error] = "Permission denied."
+      redirect_to(users_path) && return
+    end
+
+    if current_user.id == params[:id].to_i
+      flash[:error] = "You cannot delete yourself."
       redirect_to(users_path) && return
     end
 

@@ -158,12 +158,12 @@ class AssessmentsController < ApplicationController
       is_valid_tar, asmt_name = valid_asmt_tar(tar_extract)
       tar_extract.close
       unless is_valid_tar
-        flash[:error] =
-          "Invalid tarball. A valid assessment tar has a single root "\
+        flash[:error] +=
+          "<br>Invalid tarball. A valid assessment tar has a single root "\
           "directory that's named after the assessment, containing an "\
           "assessment yaml file and an assessment ruby file."
-        redirect_to(action: "install_assessment")
-        return
+        flash[:html_safe] = true
+        redirect_to(action: "install_assessment") && return
       end
     rescue SyntaxError => e
       flash[:error] = "Error parsing assessment configuration file:"
@@ -222,10 +222,40 @@ class AssessmentsController < ApplicationController
 
   def importAssessment
     @assessment = @course.assessments.new(name: params[:assessment_name])
-    @assessment.load_yaml # this will save the assessment
+    assessment_path = Rails.root.join("courses/#{@course.name}/#{@assessment.name}")
+    # not sure if this check is 100% necessary anymore, but is a last resort
+    # against creating an invalid assessment
+    if params[:assessment_name] != @assessment.name
+      flash[:error] = "Error creating assessment: Config module is named #{@assessment.name}
+                       but assessment file name is #{params[:assessment_name]}"
+      # destroy model
+      destroy_no_redirect
+      # need to delete explicitly b/c the paths don't match
+      FileUtils.rm_rf(assessment_path)
+      redirect_to(install_assessment_course_assessments_path(@course)) && return
+    end
+
+    begin
+      @assessment.load_yaml # this will save the assessment
+    rescue StandardError => e
+      flash[:error] = "Error loading yaml: #{e}"
+      destroy_no_redirect
+      # need to delete explicitly b/c the paths don't match
+      FileUtils.rm_rf(assessment_path)
+      redirect_to(install_assessment_course_assessments_path(@course)) && return
+    end
     @assessment.load_embedded_quiz # this will check and load embedded quiz
     @assessment.construct_folder # make sure there's a handin folder, just in case
-    @assessment.load_config_file # only call this on saved assessments
+    begin
+      @assessment.load_config_file # only call this on saved assessments
+    rescue StandardError => e
+      flash[:error] = "Error loading config module: #{e}"
+      destroy_no_redirect
+      # need to delete explicitly b/c the paths don't match
+      FileUtils.rm_rf(assessment_path)
+      redirect_to(install_assessment_course_assessments_path(@course)) && return
+    end
+    flash[:success] = "Successfully imported #{@assessment.name}"
     redirect_to([@course, @assessment])
   end
 
@@ -622,13 +652,18 @@ class AssessmentsController < ApplicationController
       redirect_to(action: "index") && return
     end
 
-    resp = get_job_status(job_id)
+    begin
+      resp = get_job_status(job_id)
 
-    if resp["is_assigned"]
-      resp['partial_feedback'] = tango_get_partial_feedback(job_id)
+      if resp["is_assigned"]
+        resp['partial_feedback'] = tango_get_partial_feedback(job_id)
+      end
+    rescue AutogradeError => e
+      render json: { error: "Get partial feedback request failed: #{e}" },
+             status: :internal_server_error
+    else
+      render json: resp.to_json
     end
-
-    render json: resp.to_json
   end
 
   def parseScore(feedback)
@@ -720,14 +755,32 @@ class AssessmentsController < ApplicationController
 
   action_auth_level :update, :instructor
   def update
-    unless params[:assessment][:embedded_quiz_form].nil?
-      @assessment.embedded_quiz_form_data = params[:assessment][:embedded_quiz_form].read
+    uploaded_embedded_quiz_form = params[:assessment][:embedded_quiz_form]
+    uploaded_config_file = params[:assessment][:config_file]
+    unless uploaded_embedded_quiz_form.nil?
+      @assessment.embedded_quiz_form_data = uploaded_embedded_quiz_form.read
       @assessment.save!
+    end
+
+    unless uploaded_config_file.nil?
+      config_source = uploaded_config_file.read
+
+      assessment_config_file_path = @assessment.source_config_file_path
+      File.open(assessment_config_file_path, "w") do |f|
+        f.write(config_source)
+      end
+
+      begin
+        @assessment.load_config_file
+      rescue StandardError, SyntaxError => e
+        @error = e
+        render("reload") && return
+      end
     end
 
     begin
       @assessment.update!(edit_assessment_params)
-      flash[:success] = "Saved!"
+      flash[:success] = "Assessment configuration updated!"
 
       redirect_to(tab_index) && return
     rescue ActiveRecord::RecordInvalid => e
@@ -902,6 +955,7 @@ private
     end
 
     ass.delete(:name)
+    ass.delete(:config_file)
 
     ass.permit!
   end
@@ -914,6 +968,7 @@ private
     asmt_name = nil
     asmt_rb_exists = false
     asmt_yml_exists = false
+    asmt_name_is_valid = true
     tar_extract.each do |entry|
       pathname = entry.full_name
       next if pathname.start_with? "."
@@ -942,7 +997,25 @@ private
         asmt_yml_exists = true if pathname == "#{asmt_name}/#{asmt_name}.yml"
       end
     end
-    [asmt_rb_exists && asmt_yml_exists && !asmt_name.nil?, asmt_name]
+    # it is possible that the assessment path does not match the
+    # the expected assessment path when the Ruby config file
+    # has a different name then the pathname
+    if !asmt_name.nil? && asmt_name =~ /[^a-z0-9]/
+      flash[:error] = "Errors found in tarball: Assessment name #{asmt_name} is invalid.
+                       Assessment file names must only contain lowercase
+                       letters and digits with no spaces."
+      asmt_name_is_valid = false
+    end
+    if !(asmt_rb_exists && asmt_yml_exists && !asmt_name.nil?)
+      flash[:error] = "Errors found in tarball:"
+      if !asmt_yml_exists && !asmt_name.nil?
+        flash[:error] += "<br>Assessment yml file #{asmt_name}/#{asmt_name}.yml was not found"
+      end
+      if !asmt_rb_exists && !asmt_name.nil?
+        flash[:error] += "<br>Assessment rb file #{asmt_name}/#{asmt_name}.rb was not found"
+      end
+    end
+    [asmt_rb_exists && asmt_yml_exists && !asmt_name.nil? && asmt_name_is_valid, asmt_name]
   end
 
   def tab_index
@@ -960,5 +1033,21 @@ private
     end
 
     "#{edit_course_assessment_path(@course, @assessment)}/#tab_#{tab_name}"
+  end
+
+  def destroy_no_redirect
+    @assessment.submissions.each(&:destroy)
+
+    @assessment.attachments.each(&:destroy)
+
+    # Delete config file copy in assessmentConfig
+    if File.exist? @assessment.config_file_path
+      File.delete @assessment.config_file_path
+    end
+    if File.exist? @assessment.config_backup_file_path
+      File.delete @assessment.config_backup_file_path
+    end
+
+    @assessment.destroy # awwww!!!!
   end
 end

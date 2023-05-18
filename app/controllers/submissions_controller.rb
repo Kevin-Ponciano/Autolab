@@ -90,12 +90,12 @@ class SubmissionsController < ApplicationController
     end
 
     if @submission.update(edit_submission_params)
-      redirect_to(history_course_assessment_path(@submission.course_user_datum.course,
-                                                 @assessment)) && return
+      flash[:success] = "Submission successfully updated"
+      redirect_to(course_assessment_submissions_path(@course, @assessment)) && return
     end
 
     # Error case
-    flash[:error] = "Error: There were errors editing the submission."
+    flash[:error] = "Error: There were errors updating the submission."
     @submission.errors.full_messages.each do |msg|
       flash[:error] += "<br>#{msg}"
     end
@@ -230,7 +230,7 @@ class SubmissionsController < ApplicationController
 
       Prawn::Document.generate(@filename_annotated, template: @filename) do |pdf|
         @annotations.each do |annotation|
-          return if annotation.coordinate.nil?
+          next if annotation.coordinate.nil?
 
           position = annotation.coordinate.split(",")
           page  = position[2].to_i
@@ -577,6 +577,10 @@ class SubmissionsController < ApplicationController
         # This means that in _version_links.html.erb, header_position is not set in the querystring
         # for the prev / next button urls
         # This is fine since #download ignores header_position for non-archives
+
+        if @submission.version != submission.version
+          submission.header_position = header_position
+        end
 
         matchedVersions << {
           version: submission.version,

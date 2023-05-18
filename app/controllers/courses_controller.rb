@@ -1,14 +1,15 @@
 require "archive"
 require "csv"
 require "fileutils"
+require "pathname"
 require "statistics"
 
 class CoursesController < ApplicationController
-  skip_before_action :set_course, only: %i[index new create]
+  skip_before_action :set_course, only: %i[courses_redirect index new create]
   # you need to be able to pick a course to be authorized for it
-  skip_before_action :authorize_user_for_course, only: %i[index new create]
+  skip_before_action :authorize_user_for_course, only: %i[courses_redirect index new create]
   # if there's no course, there are no persistent announcements for that course
-  skip_before_action :update_persistent_announcements, only: %i[index new create]
+  skip_before_action :update_persistent_announcements, only: %i[courses_redirect index new create]
 
   rescue_from ActionView::MissingTemplate do |_exception|
     redirect_to("/home/error_404")
@@ -20,6 +21,21 @@ class CoursesController < ApplicationController
     redirect_to(home_no_user_path) && return unless courses_for_user.any?
 
     @listing = categorize_courses_for_listing courses_for_user
+  end
+
+  def courses_redirect
+    courses_for_user = User.courses_for_user current_user
+    redirect_to(home_no_user_path) && return unless courses_for_user.any?
+
+    @listing = categorize_courses_for_listing courses_for_user
+    # if only enrolled in one course (currently), go to that course
+    # only happens when first loading the site, not when user goes back to courses
+    if @listing[:current].one?
+      course_name = @listing[:current][0].name
+      redirect_to course_assessments_url(course_name)
+    else
+      redirect_to(action: :index)
+    end
   end
 
   action_auth_level :show, :student
@@ -112,6 +128,8 @@ class CoursesController < ApplicationController
           instructor = User.instructor_create(params[:instructor_email],
                                               @newCourse.name)
         rescue StandardError => e
+          # roll back course creation
+          @newCourse.destroy
           flash[:error] = "Can't create instructor for the course: #{e}"
           render(action: "new") && return
         end
@@ -153,10 +171,25 @@ class CoursesController < ApplicationController
 
   action_auth_level :update, :instructor
   def update
-    flash[:error] = "Cannot update nil course" if @course.nil?
+    uploaded_config_file = params[:editCourse][:config_file]
+    unless uploaded_config_file.nil?
+      config_source = uploaded_config_file.read
+
+      course_config_source_path = @course.source_config_file_path
+      File.open(course_config_source_path, "w") do |f|
+        f.write(config_source)
+      end
+
+      begin
+        @course.reload_course_config
+      rescue StandardError, SyntaxError => e
+        @error = e
+        render("reload") && return
+      end
+    end
 
     if @course.update(edit_course_params)
-      flash[:success] = "Success: Course info updated."
+      flash[:success] = "Course configuration updated!"
     else
       flash[:error] = "Error: There were errors editing the course."
       @course.errors.full_messages.each do |msg|
@@ -238,7 +271,7 @@ class CoursesController < ApplicationController
     # check if user_emails and role exist in params
     unless params.key?(:user_emails) && params.key?(:role)
       flash[:error] = "No user emails or role supplied"
-      redirect_to(course_users_path(@course)) && return
+      redirect_to(users_course_path(@course)) && return
     end
 
     user_emails = params[:user_emails].split(/\n/).map(&:strip)
@@ -475,13 +508,7 @@ class CoursesController < ApplicationController
   end
 
   action_auth_level :moss, :instructor
-  def moss
-    @courses = Course.all.select do |course|
-      @cud.user.administrator ||
-        !course.course_user_data.joins(:user).find_by(users: { email: @cud.user.email },
-                                                      instructor: true).nil?
-    end
-  end
+  def moss; end
 
   LANGUAGE_WHITELIST = %w[c cc java ml pascal ada lisp scheme haskell fortran ascii vhdl perl
                           matlab python mips prolog spice vb csharp modula2 a8086 javascript plsql
@@ -1081,15 +1108,18 @@ private
         pathname = Archive.get_entry_name(entry)
         next if Archive.looks_like_directory?(pathname)
 
-        destination = if archive
-                        File.join(extFilesDir,
-                                  pathname)
+        output_dir = if archive
+                       extFilesDir
                       else
-                        File.join(baseFilesDir, pathname)
+                        baseFilesDir
                       end
-        pathname.gsub!(%r{/}, "-")
+        output_file = File.join(output_dir, pathname)
+
+        # skip if the file lies outside the archive
+        next unless Archive.in_dir?(Pathname(output_file), Pathname(output_dir))
+
         # make sure all subdirectories are there
-        File.open(destination, "wb") do |out|
+        File.open(output_file, "wb") do |out|
           out.write Archive.read_entry_file(entry)
           begin
             out.fsync
